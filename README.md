@@ -1,27 +1,48 @@
 # SAMA Images Worker
 
-Worker para buscar candidatos con Google Programmable Search y descargar imágenes aprobadas para la galería local. El almacenamiento en R2 queda para una fase posterior.
+Worker que recibe imágenes aprobadas desde el panel de Administración y las guarda en Cloudflare R2. La búsqueda se realiza manualmente en Google Imágenes; este Worker no depende de SerpApi.
 
-## Configuración
+## Configuración de R2
 
-1. Configura los secretos:
+En `wrangler.toml` debe existir un binding llamado `IMAGES_BUCKET`:
+
+```toml
+[[r2_buckets]]
+binding = "IMAGES_BUCKET"
+bucket_name = "sama-images"
+```
+
+También se necesita una URL pública para servir los objetos guardados. Puede ser un dominio personalizado o la URL del propio Worker:
 
 ```powershell
-npx wrangler secret put GOOGLE_SEARCH_API_KEY
-npx wrangler secret put GOOGLE_SEARCH_ENGINE_ID
+npx wrangler secret put PUBLIC_BASE_URL
+```
+
+El valor debe terminar sin `/`, por ejemplo:
+
+```text
+https://sama-images-api.developpage.workers.dev
+```
+
+Configura los secretos de autenticación:
+
+```powershell
 npx wrangler secret put SUPABASE_URL
 npx wrangler secret put SUPABASE_ANON_KEY
 ```
 
-2. Revisa `wrangler.toml` y despliega:
+Despliega el Worker:
 
 ```powershell
 npx wrangler deploy
 ```
 
-El endpoint acepta:
+## Acciones
 
-- `POST { "action": "search", "query": "..." }`
-- `POST { "action": "download", "imageUrl": "...", "filename": "..." }`
+El endpoint autenticado acepta:
 
-Las imágenes solo se descargan después de la selección manual en Administración. Google y los sitios de origen pueden tener restricciones de uso; la aprobación del usuario debe considerar la licencia de cada imagen. En una fase posterior se puede agregar un destino R2 conservando los mismos nombres por SKU.
+- `POST { "action": "save", "sku": "...", "images": [...] }`
+
+Cada imagen puede incluir `imageUrl` para que el Worker la descargue, o `imageData` como `data:image/...;base64,...` para archivos arrastrados desde el equipo. El Worker devuelve `saved[].imageUrl`; la primera imagen se registra en `products."Image(url)"`.
+
+El endpoint `GET /products/<sku>/<filename>` sirve los objetos desde R2 cuando el binding está configurado.

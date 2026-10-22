@@ -1,3 +1,8 @@
 name = "sama-images-api"
 main = "src/index.js"
 compatibility_date = "2026-10-21"
+
+# Activa este binding cuando crees el bucket en Cloudflare R2:
+# [[r2_buckets]]
+# binding = "IMAGES_BUCKET"
+# bucket_name = "sama-images"

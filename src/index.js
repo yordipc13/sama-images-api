@@ -1,5 +1,5 @@
 const corsHeaders = {
-  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Origin": "*",
   "Content-Type": "application/json; charset=utf-8",
@@ -30,6 +30,15 @@ function extensionFor(contentType) {
   }[contentType] || "bin";
 }
 
+function decodeImageData(value, contentType) {
+  const match = /^data:([^;,]+);base64,(.+)$/s.exec(String(value || ""));
+  if (!match || !allowedImageTypes.has(match[1].toLowerCase())) return null;
+  const resolvedType = match[1].toLowerCase();
+  const bytes = Uint8Array.from(atob(match[2]), character => character.charCodeAt(0));
+  if (!bytes.byteLength || bytes.byteLength > MAX_IMAGE_BYTES) return null;
+  return { bytes, contentType: contentType || resolvedType };
+}
+
 async function requireAdmin(request, env) {
   if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) return json({ error: "Faltan SUPABASE_URL o SUPABASE_ANON_KEY en el Worker." }, 500);
   const authorization = request.headers.get("Authorization");
@@ -45,38 +54,6 @@ async function requireAdmin(request, env) {
   return null;
 }
 
-async function searchImages(body, env) {
-  if (!env.GOOGLE_SEARCH_API_KEY || !env.GOOGLE_SEARCH_ENGINE_ID) {
-    return json({ error: "Faltan GOOGLE_SEARCH_API_KEY o GOOGLE_SEARCH_ENGINE_ID en el Worker." }, 500);
-  }
-  const query = String(body.query || "").trim();
-  if (!query) return json({ error: "El campo query es obligatorio." }, 400);
-
-  const url = new URL("https://www.googleapis.com/customsearch/v1");
-  url.searchParams.set("key", env.GOOGLE_SEARCH_API_KEY);
-  url.searchParams.set("cx", env.GOOGLE_SEARCH_ENGINE_ID);
-  url.searchParams.set("q", query);
-  url.searchParams.set("searchType", "image");
-  url.searchParams.set("num", "10");
-  url.searchParams.set("safe", "active");
-  url.searchParams.set("imgType", "photo");
-
-  const response = await fetch(url);
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) return json({ error: payload.error?.message || "Google rechazó la búsqueda." }, response.status >= 500 ? 502 : response.status);
-
-  const items = (payload.items || []).map(item => ({
-    imageUrl: item.link,
-    thumbnailUrl: item.image?.thumbnailLink || item.link,
-    title: item.title || "",
-    sourcePageUrl: item.image?.contextLink || item.displayLink || "",
-    width: item.image?.width || null,
-    height: item.image?.height || null,
-  })).filter(item => validRemoteUrl(item.imageUrl));
-
-  return json({ items });
-}
-
 async function saveImages(body, env) {
   if (!env.IMAGES_BUCKET || !env.PUBLIC_BASE_URL) {
     return json({ error: "Faltan el binding IMAGES_BUCKET o PUBLIC_BASE_URL en el Worker." }, 500);
@@ -90,14 +67,23 @@ async function saveImages(body, env) {
   const saved = [];
   for (let index = 0; index < images.length; index += 1) {
     const image = images[index];
-    if (!validRemoteUrl(image?.imageUrl)) continue;
-    const response = await fetch(image.imageUrl, { redirect: "follow" });
-    if (!response.ok) continue;
-    const contentType = (response.headers.get("content-type") || "").split(";")[0].toLowerCase();
-    const contentLength = Number(response.headers.get("content-length") || 0);
-    if (!allowedImageTypes.has(contentType) || contentLength > MAX_IMAGE_BYTES) continue;
-    const bytes = await response.arrayBuffer();
-    if (bytes.byteLength === 0 || bytes.byteLength > MAX_IMAGE_BYTES) continue;
+    let bytes;
+    let contentType;
+    if (image?.imageData) {
+      const decoded = decodeImageData(image.imageData, image.contentType);
+      if (!decoded) continue;
+      bytes = decoded.bytes;
+      contentType = decoded.contentType;
+    } else {
+      if (!validRemoteUrl(image?.imageUrl)) continue;
+      const response = await fetch(image.imageUrl, { redirect: "follow" });
+      if (!response.ok) continue;
+      contentType = (response.headers.get("content-type") || "").split(";")[0].toLowerCase();
+      const contentLength = Number(response.headers.get("content-length") || 0);
+      if (!allowedImageTypes.has(contentType) || contentLength > MAX_IMAGE_BYTES) continue;
+      bytes = new Uint8Array(await response.arrayBuffer());
+    }
+    if (!bytes.byteLength || bytes.byteLength > MAX_IMAGE_BYTES) continue;
 
     const extension = extensionFor(contentType);
     const key = `products/${encodeURIComponent(sku)}/${index === 0 ? "primary" : `secondary-${String(index).padStart(2, "0")}`}.${extension}`;
@@ -165,7 +151,6 @@ export default {
       return json({ error: "El cuerpo debe ser JSON válido." }, 400);
     }
     try {
-      if (body.action === "search") return await searchImages(body, env);
       if (body.action === "save") return await saveImages(body, env);
       if (body.action === "download") return await downloadImage(body);
       return json({ error: "Acción no válida. Usa search o save." }, 400);
